@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
+
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -160,7 +162,15 @@ class RunViewSet(viewsets.ModelViewSet):
         (llm-ledger-client + this app) rather than assumed up front."""
         run_id = request.data.get("run_id")
         if run_id:
-            existing = Run.objects.filter(run_id=run_id).first()
+            try:
+                existing = Run.objects.filter(run_id=run_id).first()
+            except (ValueError, ValidationError):
+                # run_id isn't a valid UUID -- a real bug found live, 2026-10-15: filtering a UUIDField
+                # by a malformed string raises here instead of returning no match, which crashed this
+                # whole request with an unhandled 500 instead of falling through to the serializer's
+                # own clean "not a valid UUID" 400. Treat "can't even look it up" the same as "found
+                # nothing": fall through to normal creation, which will give the real validation error.
+                existing = None
             if existing is not None:
                 return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
         return super().create(request, *args, **kwargs)

@@ -130,3 +130,10 @@ def test_undeclared_filter_param_is_ignored_not_silently_returning_everything(cl
     resp = client.get("/api/runs/", {"project": "project-a"})
     ids = [r["id"] for r in resp.data["results"]]
     assert ids == [run_a.id]
+
+
+def test_posting_a_non_uuid_run_id_returns_a_clean_400_not_a_500(client):
+    """Real bug found live, 2026-10-15: filtering Run by a malformed run_id crashed the idempotency
+    pre-check with an unhandled 500 instead of falling through to the serializer's own validation."""
+    resp = client.post("/api/runs/", {"run_id": "not-a-real-uuid", "project": "p"}, format="json")
+    assert resp.status_code == 400
