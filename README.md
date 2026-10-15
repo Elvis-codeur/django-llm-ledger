@@ -58,15 +58,54 @@ Defaults to SQLite and `DEBUG=True` for local use — override via `LLM_LEDGER_D
   (`cost_usd` stays 0, correctly — see the field's docstring); `api_equivalent_cost_usd` can hold an
   estimate of what the same tokens would cost at list price, kept in its own column so it can never
   leak into a real-cost total.
+- **`Tag`** — a key/value cost-allocation label (`project:x`, `type:training`), AWS-style, attachable to
+  a `Run` or an `Expense` so spend can be sliced by any combination of dimensions later.
+- **`Expense`** — any real cost that is NOT a per-token LLM call: GPU pod rental, storage, a flat fee.
+  `source` names the billing system (e.g. `"runpod"`), `category` the kind of resource within it.
+  Idempotent by `(source, external_id)`, same pattern as `LLMCall.external_id`. Has `ExpenseComment`
+  for leaving a note on a weird/unexplained line item. **Append-only**: a wrong `Expense` is voided
+  (`voided`/`void_reason`/`superseded_by`), never deleted — see "Accounting notes" below.
 
 ## API
 
 ```
 GET/POST   /model-pricing/
 GET/POST   /runs/
-GET        /runs/<id>/cost/        -- real spend total, subscription calls kept separate
+GET        /runs/<id>/cost/            -- real spend total, subscription calls kept separate
 GET/POST   /calls/
+GET/POST   /tags/                      -- idempotent by (key, value)
+GET        /tags/<id>/cost/            -- LLM + Expense total under this one tag
+GET/POST   /expenses/
+GET/POST   /expenses/<id>/comments/
+POST       /expenses/<id>/void/        -- {"reason": "...", "superseded_by": <id>?}
+GET        /cost-summary/?key=...&value=...        (repeatable, ANDs across pairs)
+GET        /cost-timeseries/?start=...&end=...&bucket=day|week|month&key=...&value=...
+GET        /cost-distribution/?metric=expense|llm_call&start=...&end=...&key=...&value=...
 ```
+
+A Python SDK for the read/analysis side of this (`cost_summary`, `cost_timeseries`,
+`cost_distribution`, tag/expense helpers) lives in the sibling package
+[`llm-ledger-client`](https://github.com/Elvis-codeur/llm-ledger-client)'s `LedgerAnalysis` class.
+
+## Accounting notes
+
+This isn't built by an accountant, but it follows a few real bookkeeping conventions on purpose:
+
+- **Accrual, not cash, basis.** `occurred_at`/`timestamp` record when a cost was actually incurred
+  (when the GPU ran, when the API call happened), not when a card was charged or an invoice was paid.
+  That's the basis that actually lines up with which project/experiment caused the spend.
+- **Append-only — never delete a transaction.** A wrong `Expense` gets voided (kept, with
+  `void_reason`, optionally linked via `superseded_by` to its correction), the same way real
+  bookkeeping reverses an entry instead of erasing it. All cost-reading endpoints exclude voided rows
+  by default, but the row — and the record of why it was once believed correct — never disappears.
+- **Keep the source document.** `Expense.raw` stores the original billing record a cost was imported
+  from, the same instinct as keeping a receipt — never trusted over `amount_usd` for the actual sum,
+  but there for when someone needs to see where a number came from.
+- **A unique reference number per transaction.** `external_id` (unique per `source`/`run`) is the same
+  idea as a unique invoice or transaction ID — it's what makes re-running an importer safe.
+- **Reconcile against the provider's own totals periodically.** This ledger doesn't do this
+  automatically; if you import per-resource detail (e.g. per-pod RunPod billing), periodically compare
+  the sum against the provider's own aggregate billing total for the same window as a sanity check.
 
 Every viewset declares its filter fields explicitly — an undeclared query param is ignored by DRF, not
 an error, so don't expect an unlisted filter to do anything; check `views.py` for what's declared.
@@ -80,5 +119,7 @@ only way to get a cost figure you can actually trust months later.
 
 ## Status
 
-Early, freshly extracted (2026-10-15). Tests: `pytest` (16 passing). Not yet used in production outside
-the project it came from — treat 0.x as "working, not yet battle-tested as a standalone package."
+Early, freshly extracted (2026-10-15). Tests: `pytest` (32 passing). Not yet used in production outside
+the project it came from — treat 0.x as "working, not yet battle-tested as a standalone package." The
+Tag/Expense/analytics surface was live-tested against real RunPod billing data the same day it was
+added.
