@@ -1,11 +1,17 @@
 from rest_framework import serializers
 
-from .models import LLMCall, ModelPricing, Run
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Run, Tag
 
 
 class ModelPricingSerializer(serializers.ModelSerializer):
     class Meta:
         model = ModelPricing
+        fields = "__all__"
+
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
         fields = "__all__"
 
 
@@ -20,3 +26,18 @@ class LLMCallSerializer(serializers.ModelSerializer):
         model = LLMCall
         fields = "__all__"
         read_only_fields = ["cost_usd", "pricing_used"]
+
+
+class ExpenseCommentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExpenseComment
+        fields = "__all__"
+        read_only_fields = ["expense"]
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    comments = ExpenseCommentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Expense
+        fields = "__all__"
