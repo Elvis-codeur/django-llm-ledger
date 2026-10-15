@@ -14,6 +14,7 @@ from .views import (
     ModelPricingViewSet,
     ProviderPricingPolicyViewSet,
     ProviderViewSet,
+    RunStepViewSet,
     RunViewSet,
     TagViewSet,
 )
@@ -24,6 +25,7 @@ router.register("provider-pricing-policies", ProviderPricingPolicyViewSet, basen
 router.register("model-pricing", ModelPricingViewSet, basename="model-pricing")
 router.register("tags", TagViewSet, basename="tag")
 router.register("runs", RunViewSet, basename="run")
+router.register("run-steps", RunStepViewSet, basename="run-step")
 router.register("calls", LLMCallViewSet, basename="llm-call")
 router.register("expenses", ExpenseViewSet, basename="expense")
 router.register("cost-summary", CostSummaryView, basename="cost-summary")

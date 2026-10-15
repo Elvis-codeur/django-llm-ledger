@@ -10,6 +10,7 @@ from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
@@ -23,7 +24,7 @@ from .analytics import (
     filter_by_tag_pairs,
     parse_query_datetime,
 )
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, Tag
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, RunStep, Tag
 from .pricing import NoPricingError, compute_cost, find_pricing, find_provider_policy, provider_is_peak
 from .serializers import (
     ExpenseCommentSerializer,
@@ -33,6 +34,7 @@ from .serializers import (
     ProviderPricingPolicySerializer,
     ProviderSerializer,
     RunSerializer,
+    RunStepSerializer,
     TagSerializer,
 )
 
@@ -194,6 +196,80 @@ class RunViewSet(viewsets.ModelViewSet):
                 ),
             }
         )
+
+    @action(detail=True, methods=["get"])
+    def cost_by_purpose(self, request, pk=None):
+        """Groups this run's real LLMCall cost by `call_purpose` -- the same per-step cost
+        attribution already proven in agentic-doc-treatement (an STT/translation job tags each call
+        with the pipeline stage it belongs to; this surfaces where cost concentrates), generalized
+        here so any project tagging call_purpose gets this for free. Calls with an empty call_purpose
+        are grouped under "" (not dropped) -- a real job that hasn't started tagging purposes yet
+        should still show its total, not silently lose it."""
+        run = self.get_object()
+        api_calls = run.calls.filter(billing="api")
+        by_purpose: dict[str, Decimal] = {}
+        counts: dict[str, int] = {}
+        for call in api_calls:
+            key = call.call_purpose or ""
+            by_purpose[key] = by_purpose.get(key, Decimal(0)) + call.cost_usd
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(by_purpose.values(), Decimal(0))
+        return Response(
+            {
+                "run_id": str(run.run_id),
+                "total_cost_usd": str(total),
+                "by_purpose": [
+                    {
+                        "call_purpose": purpose,
+                        "cost_usd": str(cost),
+                        "call_count": counts[purpose],
+                        "pct_of_total": float(cost / total * 100) if total else 0.0,
+                    }
+                    for purpose, cost in sorted(by_purpose.items(), key=lambda kv: -kv[1])
+                ],
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def step_costs(self, request, pk=None):
+        """GPU-time equivalent of cost_by_purpose: apportions this run's total real Expense cost
+        across its RunStep phases, proportional to each step's own wall-clock duration -- there is no
+        per-call row to group by for a training run, only the phase boundaries the training script
+        itself reported. A step with no `ended_at` yet is treated as still running (duration up to
+        now), so this is safe to call mid-run, not just after completion."""
+        run = self.get_object()
+        total_expense_cost = sum((e.amount_usd for e in run.expenses.filter(voided=False)), start=Decimal(0))
+        steps = list(run.steps.all())
+        if not steps:
+            return Response({"run_id": str(run.run_id), "total_cost_usd": str(total_expense_cost), "steps": [], "note": "no RunStep rows recorded for this run"})
+
+        now = timezone.now()
+        durations = {s.id: ((s.ended_at or now) - s.started_at).total_seconds() for s in steps}
+        total_duration = sum(durations.values())
+        return Response(
+            {
+                "run_id": str(run.run_id),
+                "total_cost_usd": str(total_expense_cost),
+                "total_duration_seconds": total_duration,
+                "steps": [
+                    {
+                        "label": s.label,
+                        "duration_seconds": durations[s.id],
+                        "apportioned_cost_usd": str((total_expense_cost * Decimal(durations[s.id] / total_duration)).quantize(Decimal("0.000001"))) if total_duration else "0",
+                        "pct_of_total_duration": (durations[s.id] / total_duration * 100) if total_duration else 0.0,
+                        "still_running": s.ended_at is None,
+                    }
+                    for s in steps
+                ],
+            }
+        )
+
+
+class RunStepViewSet(viewsets.ModelViewSet):
+    queryset = RunStep.objects.all()
+    serializer_class = RunStepSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["run", "label"]
 
 
 class LLMCallViewSet(viewsets.ModelViewSet):
