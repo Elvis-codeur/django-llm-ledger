@@ -10,6 +10,7 @@ from .views import (
     ExpenseViewSet,
     LLMCallViewSet,
     ModelPricingViewSet,
+    ProviderPricingPolicyViewSet,
     ProviderViewSet,
     RunViewSet,
     TagViewSet,
@@ -17,6 +18,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register("providers", ProviderViewSet, basename="provider")
+router.register("provider-pricing-policies", ProviderPricingPolicyViewSet, basename="provider-pricing-policy")
 router.register("model-pricing", ModelPricingViewSet, basename="model-pricing")
 router.register("tags", TagViewSet, basename="tag")
 router.register("runs", RunViewSet, basename="run")

@@ -1,8 +1,9 @@
 from django.contrib import admin
 
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, Run, Tag
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, Tag
 
 admin.site.register(Provider)
+admin.site.register(ProviderPricingPolicy)
 admin.site.register(ModelPricing)
 admin.site.register(Tag)
 admin.site.register(Run)
