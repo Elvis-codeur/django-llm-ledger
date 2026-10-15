@@ -133,3 +133,68 @@ def test_a_comment_can_be_added_to_an_expense_and_listed_back(client):
 
     full_expense = client.get(f"/api/expenses/{expense.id}/")
     assert len(full_expense.data["comments"]) == 1
+
+
+def test_cost_timeseries_buckets_by_day_and_includes_both_cost_shapes(client):
+    from datetime import datetime
+
+    run = Run.objects.create(run_id=uuid.uuid4(), project="p")
+    LLMCall.objects.create(run=run, provider="x", model="m", cost_usd=Decimal("1.00"), billing="api",
+                            timestamp=datetime(2026, 10, 10, 12, 0, tzinfo=__import__("datetime").timezone.utc))
+    Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("2.00"),
+                            occurred_at=datetime(2026, 10, 10, 13, 0, tzinfo=__import__("datetime").timezone.utc))
+    Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("3.00"),
+                            occurred_at=datetime(2026, 10, 11, 9, 0, tzinfo=__import__("datetime").timezone.utc))
+
+    resp = client.get("/api/cost-timeseries/", {"start": "2026-10-10", "end": "2026-10-11", "bucket": "day"})
+    assert resp.status_code == 200, resp.data
+    series = {row["bucket_start"]: row for row in resp.data["series"]}
+    assert series["2026-10-10"]["total_cost_usd"] == "3.000000"
+    assert series["2026-10-11"]["total_cost_usd"] == "3.000000"
+    assert resp.data["total_cost_usd"] == "6.000000"
+
+
+def test_cost_timeseries_rejects_a_bad_bucket(client):
+    resp = client.get("/api/cost-timeseries/", {"bucket": "fortnight"})
+    assert resp.status_code == 400
+
+
+def test_cost_distribution_over_expenses_matches_hand_computed_stats(client):
+    for amount in ["1.00", "2.00", "3.00", "4.00", "100.00"]:
+        Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal(amount))
+
+    resp = client.get("/api/cost-distribution/", {"metric": "expense"})
+    assert resp.status_code == 200, resp.data
+    assert resp.data["count"] == 5
+    assert resp.data["sum_usd"] == "110.000000"
+    assert float(resp.data["median_usd"]) == 3.0
+    assert float(resp.data["max_usd"]) == 100.0
+    assert float(resp.data["min_usd"]) == 1.0
+
+
+def test_cost_distribution_rejects_a_bad_metric(client):
+    resp = client.get("/api/cost-distribution/", {"metric": "nonsense"})
+    assert resp.status_code == 400
+
+
+def test_voiding_an_expense_excludes_it_from_cost_summary_but_keeps_the_row(client):
+    tag = Tag.objects.create(key="project", value="p")
+    expense = Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("50.00"))
+    expense.tags.add(tag)
+    correction = Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("5.00"))
+    correction.tags.add(tag)
+
+    resp = client.post(f"/api/expenses/{expense.id}/void/", {"reason": "wrong amount, see corrected row", "superseded_by": correction.id}, format="json")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["voided"] is True
+
+    assert Expense.objects.filter(id=expense.id).exists()  # still there, not deleted
+
+    summary = client.get("/api/cost-summary/", {"key": "project", "value": "p"})
+    assert summary.data["expense_cost_usd"] == "5.000000"  # only the correction counts
+
+
+def test_voiding_without_a_reason_is_rejected(client):
+    expense = Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("1.00"))
+    resp = client.post(f"/api/expenses/{expense.id}/void/", {}, format="json")
+    assert resp.status_code == 400

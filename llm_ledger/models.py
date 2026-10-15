@@ -196,6 +196,15 @@ class Expense(models.Model):
     raw = models.JSONField(default=dict, blank=True)
     run = models.ForeignKey(Run, on_delete=models.SET_NULL, null=True, blank=True, related_name="expenses")
     tags = models.ManyToManyField(Tag, blank=True, related_name="expenses")
+    # A ledger should be append-only, like real bookkeeping: a wrong entry gets VOIDED and a corrected
+    # one posted alongside it, never hard-deleted -- deleting a transaction erases the audit trail of
+    # what was believed true and when. `voided` rows are excluded from cost-summary/timeseries/
+    # distribution by default (pass include_voided=1 to see them), but stay in the table and keep their
+    # comments. `superseded_by` links a voided row to whatever replaced it, so the correction is
+    # traceable instead of just "this number disappeared."
+    voided = models.BooleanField(default=False)
+    void_reason = models.TextField(blank=True, default="")
+    superseded_by = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="supersedes")
 
     class Meta:
         ordering = ["-occurred_at"]
