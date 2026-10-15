@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from django.db.models import Q
 
-from .models import ModelPricing, Provider
+from .models import ModelPricing, Provider, ProviderPricingPolicy
 
 
 class NoPricingError(ValueError):
@@ -17,23 +17,45 @@ class NoPricingError(ValueError):
     since a silent $0 looks identical to a real subscription call with no marginal cost."""
 
 
-def _effective_offpeak_multiplier(pricing: ModelPricing) -> Decimal | None:
+def find_provider_policy(provider: Provider, at: datetime | date) -> ProviderPricingPolicy | None:
+    """The policy that was in effect for this provider AT `at` -- never "whatever the provider's
+    policy is today". None if no policy row covers that date (the provider has never had a peak/
+    off-peak schedule, or didn't yet at that point in time). Same time-boxed lookup shape as
+    find_pricing(), deliberately: a policy that changes over time needs the exact same discipline as
+    a price that changes over time, for the exact same reason."""
+    d = at.date() if isinstance(at, datetime) else at
+    return (
+        ProviderPricingPolicy.objects.filter(provider=provider, effective_from__lte=d)
+        .filter(Q(effective_until__isnull=True) | Q(effective_until__gte=d))
+        .order_by("-effective_from")
+        .first()
+    )
+
+
+def _effective_offpeak_multiplier(pricing: ModelPricing, at: datetime) -> Decimal | None:
     """A ModelPricing row's own value wins when set (a model-specific override); otherwise falls back
-    to its Provider's value -- the peak/off-peak STRATEGY belongs to the provider, not each model."""
+    to whatever policy its Provider had in effect AT `at` -- the peak/off-peak STRATEGY belongs to the
+    provider and can change over time, same as a price can."""
     if pricing.offpeak_multiplier is not None:
         return pricing.offpeak_multiplier
-    return pricing.provider.offpeak_multiplier if pricing.provider_id else None
+    if not pricing.provider_id:
+        return None
+    policy = find_provider_policy(pricing.provider, at)
+    return policy.offpeak_multiplier if policy else None
 
 
-def _effective_peak_windows(pricing: ModelPricing) -> dict | None:
+def _effective_peak_windows(pricing: ModelPricing, at: datetime) -> dict | None:
     if pricing.peak_windows_utc:
         return pricing.peak_windows_utc
-    return pricing.provider.peak_windows_utc if pricing.provider_id else None
+    if not pricing.provider_id:
+        return None
+    policy = find_provider_policy(pricing.provider, at)
+    return policy.peak_windows_utc if policy else None
 
 
 def is_peak(peak_windows_utc: dict | None, at: datetime) -> bool | None:
     """True/False given a peak_windows_utc dict and a timestamp; None if no windows are defined at all
-    (peak/off-peak doesn't apply -- flat pricing). Shared by Provider.is_peak_at() and pricing's own
+    (peak/off-peak doesn't apply -- flat pricing). Shared by provider_is_peak() and pricing's own
     off-peak check so there is exactly one place that reads this format."""
     if not peak_windows_utc:
         return None
@@ -50,9 +72,11 @@ def is_peak(peak_windows_utc: dict | None, at: datetime) -> bool | None:
 
 def provider_is_peak(provider: Provider, at: datetime | None = None) -> bool | None:
     """The "accountancy map -- at which hour are we" check for one provider, independent of any model:
-    True/False if the provider has a defined peak/off-peak schedule, None if it has flat pricing (the
-    question doesn't apply). `at` defaults to now."""
-    return is_peak(provider.peak_windows_utc, at or datetime.now(dt_timezone.utc))
+    True/False using whatever policy was in effect AT `at` (default: now), None if no policy covers
+    that date at all (flat pricing, or no policy existed yet)."""
+    at = at or datetime.now(dt_timezone.utc)
+    policy = find_provider_policy(provider, at)
+    return is_peak(policy.peak_windows_utc, at) if policy else None
 
 
 def find_pricing(model: str, at: datetime | date | None = None) -> ModelPricing:
@@ -81,8 +105,8 @@ def compute_cost(
     """USD cost for one call, applying the off-peak multiplier (the pricing row's own, falling back to
     its Provider's -- see `_effective_offpeak_multiplier`) based on `at`'s UTC weekday/hour against
     `peak_windows_utc`."""
-    effective_multiplier = _effective_offpeak_multiplier(pricing)
-    effective_windows = _effective_peak_windows(pricing)
+    effective_multiplier = _effective_offpeak_multiplier(pricing, at)
+    effective_windows = _effective_peak_windows(pricing, at)
     peak = is_peak(effective_windows, at) if effective_multiplier is not None else None
     # peak is None (no windows defined) or True (currently peak) -> full price. Only a confirmed
     # False (currently off-peak) applies the multiplier -- identical behavior to the old _is_offpeak,

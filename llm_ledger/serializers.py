@@ -1,11 +1,17 @@
 from rest_framework import serializers
 
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, Run, Tag
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, Tag
 
 
 class ProviderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Provider
+        fields = "__all__"
+
+
+class ProviderPricingPolicySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProviderPricingPolicy
         fields = "__all__"
 
 

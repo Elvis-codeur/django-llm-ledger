@@ -21,13 +21,14 @@ from .analytics import (
     filter_by_tag_pairs,
     parse_query_datetime,
 )
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, Run, Tag
-from .pricing import NoPricingError, compute_cost, find_pricing, provider_is_peak
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, Tag
+from .pricing import NoPricingError, compute_cost, find_pricing, find_provider_policy, provider_is_peak
 from .serializers import (
     ExpenseCommentSerializer,
     ExpenseSerializer,
     LLMCallSerializer,
     ModelPricingSerializer,
+    ProviderPricingPolicySerializer,
     ProviderSerializer,
     RunSerializer,
     TagSerializer,
@@ -62,15 +63,24 @@ class ProviderViewSet(viewsets.ModelViewSet):
         except BadQueryParam as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         peak = provider_is_peak(provider, at)
+        policy = find_provider_policy(provider, at)
         return Response(
             {
                 "provider": provider.name,
                 "at": at.isoformat(),
-                "has_peak_schedule": peak is not None,
+                "has_peak_schedule": policy is not None,
                 "is_peak": peak,
-                "offpeak_multiplier": str(provider.offpeak_multiplier) if provider.offpeak_multiplier is not None else None,
+                "offpeak_multiplier": str(policy.offpeak_multiplier) if policy else None,
+                "policy_effective_from": policy.effective_from.isoformat() if policy else None,
             }
         )
+
+
+class ProviderPricingPolicyViewSet(viewsets.ModelViewSet):
+    queryset = ProviderPricingPolicy.objects.all()
+    serializer_class = ProviderPricingPolicySerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["provider", "verification"]
 
 
 class ModelPricingViewSet(viewsets.ModelViewSet):

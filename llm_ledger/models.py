@@ -12,32 +12,65 @@ from __future__ import annotations
 from django.db import models
 from django.utils import timezone
 
+# Shared by ModelPricing and ProviderPricingPolicy -- a price/policy is only as good as where it came
+# from, for either shape of historical row.
+VERIFICATION_CHOICES = [
+    ("primary", "Provider's own page or announcement"),
+    ("secondary", "Third-party report, not confirmed on the provider's page"),
+    ("unverified", "Recorded, never checked"),
+]
+
 
 class Provider(models.Model):
     """One API/compute provider (e.g. "deepseek", "anthropic", "runpod"), independent of any one
     model -- the same provider offers several models (DeepSeek has deepseek-flash AND deepseek-v4-pro;
     the same model id can even be hosted by more than one provider, e.g. a model available both direct
-    from its maker and via a gateway), but a provider's PRICING STRATEGY -- whether it has peak/
-    off-peak hours at all, and which hours those are -- is a property of the provider's billing
-    system, not of each individual model. Previously `ModelPricing.offpeak_multiplier`/
-    `peak_windows_utc` duplicated this per model row; those fields stay on ModelPricing for a model
-    that genuinely needs its own override, but now fall back to the provider's own values when unset
-    (see pricing.py's `_effective_offpeak_multiplier`/`_effective_peak_windows`)."""
+    from its maker and via a gateway). This row is PURE IDENTITY -- name/display/notes -- and never
+    carries the peak/off-peak schedule itself: see `ProviderPricingPolicy` for why, and `ModelPricing`
+    for why the same time-boxing matters for a single number, let alone a whole policy a provider can
+    change."""
 
     name = models.CharField(max_length=64, unique=True, help_text='short id, e.g. "deepseek", "runpod"')
     display_name = models.CharField(max_length=128, blank=True, default="")
     website_url = models.URLField(blank=True, default="")
     notes = models.TextField(blank=True, default="")
-    # Same shape as ModelPricing's own fields (see that model's docstring for the peak_windows_utc
-    # format) -- the provider-level default every one of its ModelPricing rows falls back to.
-    offpeak_multiplier = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
-    peak_windows_utc = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
 
     def __str__(self) -> str:
         return self.display_name or self.name
+
+
+class ProviderPricingPolicy(models.Model):
+    """One historical peak/off-peak POLICY for one Provider, valid over [effective_from,
+    effective_until) -- the exact same time-boxing as ModelPricing, for the exact same reason, and
+    this is not hypothetical: a provider changing its peak-hour policy is a real, expected event (a
+    user caught this gap live, 2026-10-15, before any real drift happened -- editing the policy in
+    place would have silently recomputed the peak/off-peak status of every PAST call under whatever
+    policy is current today, which is wrong the moment a provider ever changes its schedule). A policy
+    CHANGE is always a new row with a new effective_from; an old row is never edited, same discipline
+    as ModelPricing's own docstring. `ModelPricing.offpeak_multiplier`/`peak_windows_utc` still exist
+    for a model that genuinely needs its own override of its provider's policy; absent that, cost
+    computation looks up the Provider's policy that was in effect AT THE CALL'S OWN TIMESTAMP, never
+    "whatever the provider's policy is today" (see pricing.find_provider_policy)."""
+
+    provider = models.ForeignKey(Provider, on_delete=models.CASCADE, related_name="pricing_policies")
+    offpeak_multiplier = models.DecimalField(max_digits=5, decimal_places=4)
+    # Same format as ModelPricing.peak_windows_utc: {"weekdays": [0..6], "hours": [[start, end), ...]}.
+    peak_windows_utc = models.JSONField()
+    effective_from = models.DateField()
+    effective_until = models.DateField(null=True, blank=True)
+    note = models.CharField(max_length=256, blank=True, default="")
+    source_url = models.URLField(max_length=500, blank=True, default="")
+    verification = models.CharField(max_length=16, choices=VERIFICATION_CHOICES, blank=True, default="")
+    verified_at = models.DateField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["provider__name", "effective_from"]
+
+    def __str__(self) -> str:
+        return f"{self.provider.name} policy ({self.effective_from}..{self.effective_until or 'now'})"
 
 
 class ModelPricing(models.Model):
