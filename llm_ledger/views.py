@@ -7,12 +7,20 @@ this app in another project's settings can't accidentally lose the filter backen
 from __future__ import annotations
 
 from datetime import datetime, timezone as dt_timezone
+from decimal import Decimal
 
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from .analytics import (
+    BadQueryParam,
+    bucketed_sums,
+    compute_distribution,
+    filter_by_tag_pairs,
+    parse_query_datetime,
+)
 from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Run, Tag
 from .pricing import NoPricingError, compute_cost, find_pricing
 from .serializers import (
@@ -59,7 +67,7 @@ class TagViewSet(viewsets.ModelViewSet):
         tag = self.get_object()
         api_calls = LLMCall.objects.filter(run__tags=tag, billing="api")
         llm_cost = sum((c.cost_usd for c in api_calls), start=0)
-        expenses = Expense.objects.filter(tags=tag)
+        expenses = Expense.objects.filter(tags=tag, voided=False)
         expense_cost = sum((e.amount_usd for e in expenses), start=0)
         return Response(
             {
@@ -150,7 +158,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     queryset = Expense.objects.all()
     serializer_class = ExpenseSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["source", "category", "external_id", "run", "tags"]
+    filterset_fields = ["source", "category", "external_id", "run", "tags", "voided"]
 
     def create(self, request, *args, **kwargs):
         """Idempotent by (source, external_id) when external_id is given: a RunPod billing importer run
@@ -177,6 +185,24 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         serializer.save(expense=expense)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        """Marks this Expense voided instead of deleting it -- the accounting-faithful way to correct a
+        wrong entry: the original stays in the table (with why, and optionally a link to whatever
+        corrected row replaces it), so the record of what was once believed true is never erased.
+        Body: {"reason": "...", "superseded_by": <expense id>} (superseded_by optional)."""
+        expense = self.get_object()
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "'reason' is required to void an expense"}, status=status.HTTP_400_BAD_REQUEST)
+        expense.voided = True
+        expense.void_reason = reason
+        superseded_by_id = request.data.get("superseded_by")
+        if superseded_by_id:
+            expense.superseded_by = Expense.objects.filter(id=superseded_by_id).first()
+        expense.save()
+        return Response(self.get_serializer(expense).data)
+
 
 class CostSummaryView(viewsets.ViewSet):
     """One place to answer "how much have I spent on X", where X is any set of tags -- not tied to one
@@ -189,16 +215,8 @@ class CostSummaryView(viewsets.ViewSet):
         if not pairs:
             return Response({"error": "pass at least one ?key=...&value=... pair"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Each pair needs its own `.filter()` call (a separate join to the M2M table) rather than one
-        # combined Q object -- a single joined row can't simultaneously be tag A and tag B, so ANDing
-        # within one filter() would always return nothing for more than one pair.
-        runs = Run.objects.all()
-        expenses = Expense.objects.all()
-        for key, value in pairs:
-            runs = runs.filter(tags__key=key, tags__value=value)
-            expenses = expenses.filter(tags__key=key, tags__value=value)
-        runs = runs.distinct()
-        expenses = expenses.distinct()
+        runs = filter_by_tag_pairs(Run.objects.all(), pairs)
+        expenses = filter_by_tag_pairs(Expense.objects.filter(voided=False), pairs)
 
         api_calls = LLMCall.objects.filter(run__in=runs, billing="api")
         llm_cost = sum((c.cost_usd for c in api_calls), start=0)
@@ -214,3 +232,102 @@ class CostSummaryView(viewsets.ViewSet):
                 "total_cost_usd": str(llm_cost + expense_cost),
             }
         )
+
+
+def _parse_tag_pairs_and_dates(request):
+    """Shared query-param parsing for the two time-range endpoints below -- returns
+    (pairs, start_dt_or_None, end_dt_or_None) or raises BadQueryParam, which the callers turn into 400."""
+    pairs = list(zip(request.query_params.getlist("key"), request.query_params.getlist("value")))
+    start = request.query_params.get("start")
+    end = request.query_params.get("end")
+    start_dt = parse_query_datetime(start) if start else None
+    end_dt = parse_query_datetime(end, end_of_day=True) if end else None
+    return pairs, start_dt, end_dt
+
+
+class CostTimeseriesView(viewsets.ViewSet):
+    """`GET /cost-timeseries/?start=2026-10-01&end=2026-10-15&bucket=day&key=project&value=X` -- the
+    "split cost between two dates, bucketed, optionally by tag" query an agent would otherwise have to
+    hand-write (fetch everything, group by date in Python, sum). `bucket` is day/week/month (default
+    day). `start`/`end` are optional; a missing one means "no lower/upper bound". Tags are optional and
+    AND across pairs exactly like /cost-summary/. Voided expenses are excluded."""
+
+    def list(self, request):
+        try:
+            pairs, start_dt, end_dt = _parse_tag_pairs_and_dates(request)
+            bucket = request.query_params.get("bucket", "day")
+        except BadQueryParam as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        runs = filter_by_tag_pairs(Run.objects.all(), pairs)
+        calls = LLMCall.objects.filter(run__in=runs, billing="api")
+        expenses = filter_by_tag_pairs(Expense.objects.filter(voided=False), pairs)
+        if start_dt:
+            calls = calls.filter(timestamp__gte=start_dt)
+            expenses = expenses.filter(occurred_at__gte=start_dt)
+        if end_dt:
+            calls = calls.filter(timestamp__lte=end_dt)
+            expenses = expenses.filter(occurred_at__lte=end_dt)
+
+        try:
+            llm_by_bucket = bucketed_sums(calls, "timestamp", "cost_usd", bucket)
+            expense_by_bucket = bucketed_sums(expenses, "occurred_at", "amount_usd", bucket)
+        except BadQueryParam as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        all_buckets = sorted(set(llm_by_bucket) | set(expense_by_bucket))
+        series = []
+        for b in all_buckets:
+            llm_cost = llm_by_bucket.get(b, Decimal(0))
+            expense_cost = expense_by_bucket.get(b, Decimal(0))
+            series.append(
+                {
+                    "bucket_start": b.isoformat(),
+                    "llm_cost_usd": str(llm_cost),
+                    "expense_cost_usd": str(expense_cost),
+                    "total_cost_usd": str(llm_cost + expense_cost),
+                }
+            )
+        return Response(
+            {
+                "bucket": bucket,
+                "tags": [{"key": k, "value": v} for k, v in pairs],
+                "series": series,
+                "total_cost_usd": str(sum((Decimal(p["total_cost_usd"]) for p in series), start=Decimal(0))),
+            }
+        )
+
+
+class CostDistributionView(viewsets.ViewSet):
+    """`GET /cost-distribution/?metric=expense&start=...&end=...&key=...&value=...` -- count, sum, mean,
+    median, stdev, min, max, and percentiles (p10..p99) over individual cost amounts, the direct
+    "what's the probability distribution of my run costs" answer. `metric` is `expense` (default,
+    e.g. individual RunPod pod runs) or `llm_call` (individual API call costs). Voided expenses are
+    excluded."""
+
+    def list(self, request):
+        try:
+            pairs, start_dt, end_dt = _parse_tag_pairs_and_dates(request)
+        except BadQueryParam as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        metric = request.query_params.get("metric", "expense")
+
+        if metric == "expense":
+            qs = filter_by_tag_pairs(Expense.objects.filter(voided=False), pairs)
+            if start_dt:
+                qs = qs.filter(occurred_at__gte=start_dt)
+            if end_dt:
+                qs = qs.filter(occurred_at__lte=end_dt)
+            values = [e.amount_usd for e in qs]
+        elif metric == "llm_call":
+            runs = filter_by_tag_pairs(Run.objects.all(), pairs)
+            qs = LLMCall.objects.filter(run__in=runs, billing="api")
+            if start_dt:
+                qs = qs.filter(timestamp__gte=start_dt)
+            if end_dt:
+                qs = qs.filter(timestamp__lte=end_dt)
+            values = [c.cost_usd for c in qs]
+        else:
+            return Response({"error": "metric must be 'expense' or 'llm_call'"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"metric": metric, "tags": [{"key": k, "value": v} for k, v in pairs], **compute_distribution(values)})
