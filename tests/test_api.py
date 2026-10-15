@@ -95,6 +95,20 @@ def test_run_cost_endpoint_sums_real_spend_and_keeps_subscription_separate(clien
     assert resp.data["subscription_api_equivalent_cost_usd"] == "9.000000"
 
 
+def test_posting_the_same_run_id_twice_returns_the_existing_run_not_a_400(client):
+    """Real gap found via an actual cross-repo integration test (llm-ledger-client's fallback-then-
+    flush design re-POSTs a run that already succeeded live)."""
+    run_id = str(uuid.uuid4())
+    first = client.post("/api/runs/", {"run_id": run_id, "project": "p", "label": "a"}, format="json")
+    assert first.status_code == 201
+
+    second = client.post("/api/runs/", {"run_id": run_id, "project": "p", "label": "SHOULD BE IGNORED"}, format="json")
+    assert second.status_code == 200
+    assert second.data["id"] == first.data["id"]
+    assert second.data["label"] == "a"  # the existing row, not the second POST's (differing) body
+    assert Run.objects.filter(run_id=run_id).count() == 1
+
+
 def test_a_run_can_be_looked_up_by_its_own_run_id_to_resume_after_a_restart(client):
     run_id = uuid.uuid4()
     run = Run.objects.create(run_id=run_id, project="test-project")

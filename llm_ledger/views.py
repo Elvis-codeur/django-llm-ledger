@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone as dt_timezone
 
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -30,6 +30,20 @@ class RunViewSet(viewsets.ModelViewSet):
     serializer_class = RunSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ["project", "label", "purpose", "status", "run_id"]
+
+    def create(self, request, *args, **kwargs):
+        """Idempotent by run_id: a client that queued a run locally (see llm-ledger-client's
+        fallback-then-flush design) may legitimately POST the same run_id twice -- once live, once on a
+        later flush that doesn't know the first attempt already landed. A second POST for a run_id that
+        already exists returns the EXISTING row (200), not a 400 -- the same real gap LLMCall already
+        closes with its own external_id uniqueness, found by an actual cross-repo integration test
+        (llm-ledger-client + this app) rather than assumed up front."""
+        run_id = request.data.get("run_id")
+        if run_id:
+            existing = Run.objects.filter(run_id=run_id).first()
+            if existing is not None:
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
 
     @action(detail=True, methods=["get"])
     def cost(self, request, pk=None):
