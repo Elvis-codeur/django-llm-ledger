@@ -83,7 +83,7 @@ def find_pricing(model: str, at: datetime | date | None = None) -> ModelPricing:
     at = at or datetime.now(dt_timezone.utc)
     d = at.date() if isinstance(at, datetime) else at
     row = (
-        ModelPricing.objects.filter(model=model, effective_from__lte=d)
+        ModelPricing.objects.filter(model=model, effective_from__lte=d, voided=False)
         .filter(Q(effective_until__isnull=True) | Q(effective_until__gte=d))
         .order_by("-effective_from")
         .first()

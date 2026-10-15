@@ -198,3 +198,35 @@ def test_voiding_without_a_reason_is_rejected(client):
     expense = Expense.objects.create(source="runpod", category="pod", amount_usd=Decimal("1.00"))
     resp = client.post(f"/api/expenses/{expense.id}/void/", {}, format="json")
     assert resp.status_code == 400
+
+
+def test_voiding_a_modelpricing_row_excludes_it_from_find_pricing(client):
+    from datetime import date
+    from llm_ledger.models import ModelPricing
+    from llm_ledger.pricing import NoPricingError, find_pricing
+
+    wrong = ModelPricing.objects.create(
+        model="google/gemini-4-argon", input_usd_per_mtok=Decimal("2.00"), output_usd_per_mtok=Decimal("10.00"),
+        effective_from=date(2026, 10, 15),  # wrong -- recorded date, not the real announcement date
+    )
+    resp = client.post(f"/api/model-pricing/{wrong.id}/void/", {"reason": "effective_from was the recording date, not the real 2026-09-30 announcement date"}, format="json")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["voided"] is True
+
+    corrected = ModelPricing.objects.create(
+        model="google/gemini-4-argon", input_usd_per_mtok=Decimal("2.00"), output_usd_per_mtok=Decimal("10.00"),
+        effective_from=date(2026, 9, 30),
+    )
+    found = find_pricing("google/gemini-4-argon", date(2026, 10, 1))
+    assert found.id == corrected.id  # not the voided row, even though it also covers this date
+
+
+def test_voiding_a_modelpricing_row_without_a_reason_is_rejected(client):
+    from datetime import date
+    from llm_ledger.models import ModelPricing
+
+    pricing = ModelPricing.objects.create(
+        model="x", input_usd_per_mtok=Decimal("1"), output_usd_per_mtok=Decimal("1"), effective_from=date(2026, 1, 1),
+    )
+    resp = client.post(f"/api/model-pricing/{pricing.id}/void/", {}, format="json")
+    assert resp.status_code == 400

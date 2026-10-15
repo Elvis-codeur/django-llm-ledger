@@ -114,6 +114,11 @@ class ModelPricing(models.Model):
     # Exact UTC instant for a price that changes mid-day. When null, the date columns above mean whole UTC
     # days (start of effective_from through end of effective_until, both inclusive).
     starts_at = models.DateTimeField(null=True, blank=True)
+    # Append-only, same discipline as Expense: a row recorded with a wrong date or price is voided
+    # (kept, with why), never edited or deleted -- even before any real call has used it, so the habit
+    # never erodes into "but nothing depends on this one yet." The correction is always a NEW row.
+    voided = models.BooleanField(default=False)
+    void_reason = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ["model", "effective_from"]
