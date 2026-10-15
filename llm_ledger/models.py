@@ -13,6 +13,33 @@ from django.db import models
 from django.utils import timezone
 
 
+class Provider(models.Model):
+    """One API/compute provider (e.g. "deepseek", "anthropic", "runpod"), independent of any one
+    model -- the same provider offers several models (DeepSeek has deepseek-flash AND deepseek-v4-pro;
+    the same model id can even be hosted by more than one provider, e.g. a model available both direct
+    from its maker and via a gateway), but a provider's PRICING STRATEGY -- whether it has peak/
+    off-peak hours at all, and which hours those are -- is a property of the provider's billing
+    system, not of each individual model. Previously `ModelPricing.offpeak_multiplier`/
+    `peak_windows_utc` duplicated this per model row; those fields stay on ModelPricing for a model
+    that genuinely needs its own override, but now fall back to the provider's own values when unset
+    (see pricing.py's `_effective_offpeak_multiplier`/`_effective_peak_windows`)."""
+
+    name = models.CharField(max_length=64, unique=True, help_text='short id, e.g. "deepseek", "runpod"')
+    display_name = models.CharField(max_length=128, blank=True, default="")
+    website_url = models.URLField(blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    # Same shape as ModelPricing's own fields (see that model's docstring for the peak_windows_utc
+    # format) -- the provider-level default every one of its ModelPricing rows falls back to.
+    offpeak_multiplier = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
+    peak_windows_utc = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.display_name or self.name
+
+
 class ModelPricing(models.Model):
     """One historical price row for one model string, valid over [effective_from, effective_until).
     Multiple rows for the same model with non-overlapping date ranges are how a price CHANGE over time is
@@ -20,6 +47,10 @@ class ModelPricing(models.Model):
     effect then, not today's price. See `compute_cost()` below."""
 
     model = models.CharField(max_length=128)
+    # Nullable, SET_NULL: existing rows predate this field and `model` (often already "provider/id")
+    # remains the source of truth for cost computation either way -- this FK is for the peak/off-peak
+    # fallback and for querying "every pricing row for provider X" without string-matching `model`.
+    provider = models.ForeignKey(Provider, on_delete=models.SET_NULL, null=True, blank=True, related_name="pricing_rows")
     input_usd_per_mtok = models.DecimalField(max_digits=10, decimal_places=4)
     output_usd_per_mtok = models.DecimalField(max_digits=10, decimal_places=4)
     cache_read_usd_per_mtok = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)

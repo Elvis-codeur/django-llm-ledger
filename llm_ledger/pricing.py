@@ -9,12 +9,50 @@ from decimal import Decimal
 
 from django.db.models import Q
 
-from .models import ModelPricing
+from .models import ModelPricing, Provider
 
 
 class NoPricingError(ValueError):
     """No ModelPricing row covers this model at this date -- raised rather than silently costing $0,
     since a silent $0 looks identical to a real subscription call with no marginal cost."""
+
+
+def _effective_offpeak_multiplier(pricing: ModelPricing) -> Decimal | None:
+    """A ModelPricing row's own value wins when set (a model-specific override); otherwise falls back
+    to its Provider's value -- the peak/off-peak STRATEGY belongs to the provider, not each model."""
+    if pricing.offpeak_multiplier is not None:
+        return pricing.offpeak_multiplier
+    return pricing.provider.offpeak_multiplier if pricing.provider_id else None
+
+
+def _effective_peak_windows(pricing: ModelPricing) -> dict | None:
+    if pricing.peak_windows_utc:
+        return pricing.peak_windows_utc
+    return pricing.provider.peak_windows_utc if pricing.provider_id else None
+
+
+def is_peak(peak_windows_utc: dict | None, at: datetime) -> bool | None:
+    """True/False given a peak_windows_utc dict and a timestamp; None if no windows are defined at all
+    (peak/off-peak doesn't apply -- flat pricing). Shared by Provider.is_peak_at() and pricing's own
+    off-peak check so there is exactly one place that reads this format."""
+    if not peak_windows_utc:
+        return None
+    at_utc = at.astimezone(dt_timezone.utc)
+    weekdays = peak_windows_utc.get("weekdays", [])
+    if at_utc.weekday() not in weekdays:
+        return False
+    hour = at_utc.hour
+    for start, end in peak_windows_utc.get("hours", []):
+        if start <= hour < end:
+            return True
+    return False
+
+
+def provider_is_peak(provider: Provider, at: datetime | None = None) -> bool | None:
+    """The "accountancy map -- at which hour are we" check for one provider, independent of any model:
+    True/False if the provider has a defined peak/off-peak schedule, None if it has flat pricing (the
+    question doesn't apply). `at` defaults to now."""
+    return is_peak(provider.peak_windows_utc, at or datetime.now(dt_timezone.utc))
 
 
 def find_pricing(model: str, at: datetime | date | None = None) -> ModelPricing:
@@ -31,20 +69,6 @@ def find_pricing(model: str, at: datetime | date | None = None) -> ModelPricing:
     return row
 
 
-def _is_offpeak(pricing: ModelPricing, at: datetime) -> bool:
-    if pricing.offpeak_multiplier is None or not pricing.peak_windows_utc:
-        return False
-    at_utc = at.astimezone(dt_timezone.utc)
-    weekdays = pricing.peak_windows_utc.get("weekdays", [])
-    if at_utc.weekday() not in weekdays:
-        return True
-    hour = at_utc.hour
-    for start, end in pricing.peak_windows_utc.get("hours", []):
-        if start <= hour < end:
-            return False
-    return True
-
-
 def compute_cost(
     pricing: ModelPricing,
     *,
@@ -54,9 +78,16 @@ def compute_cost(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
 ) -> Decimal:
-    """USD cost for one call, applying the off-peak multiplier (if the pricing row has one) based on
-    `at`'s UTC weekday/hour against `peak_windows_utc`."""
-    multiplier = pricing.offpeak_multiplier if _is_offpeak(pricing, at) else Decimal("1")
+    """USD cost for one call, applying the off-peak multiplier (the pricing row's own, falling back to
+    its Provider's -- see `_effective_offpeak_multiplier`) based on `at`'s UTC weekday/hour against
+    `peak_windows_utc`."""
+    effective_multiplier = _effective_offpeak_multiplier(pricing)
+    effective_windows = _effective_peak_windows(pricing)
+    peak = is_peak(effective_windows, at) if effective_multiplier is not None else None
+    # peak is None (no windows defined) or True (currently peak) -> full price. Only a confirmed
+    # False (currently off-peak) applies the multiplier -- identical behavior to the old _is_offpeak,
+    # just reusing the shared is_peak() so there is one definition of the time-window format.
+    multiplier = effective_multiplier if (effective_multiplier is not None and peak is False) else Decimal("1")
     mtok = Decimal("1000000")
     total = (Decimal(prompt_tokens) / mtok) * pricing.input_usd_per_mtok
     total += (Decimal(completion_tokens) / mtok) * pricing.output_usd_per_mtok
