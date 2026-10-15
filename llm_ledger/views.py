@@ -29,7 +29,7 @@ class RunViewSet(viewsets.ModelViewSet):
     queryset = Run.objects.all()
     serializer_class = RunSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["project", "label", "purpose", "status"]
+    filterset_fields = ["project", "label", "purpose", "status", "run_id"]
 
     @action(detail=True, methods=["get"])
     def cost(self, request, pk=None):

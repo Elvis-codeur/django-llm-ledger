@@ -95,6 +95,16 @@ def test_run_cost_endpoint_sums_real_spend_and_keeps_subscription_separate(clien
     assert resp.data["subscription_api_equivalent_cost_usd"] == "9.000000"
 
 
+def test_a_run_can_be_looked_up_by_its_own_run_id_to_resume_after_a_restart(client):
+    run_id = uuid.uuid4()
+    run = Run.objects.create(run_id=run_id, project="test-project")
+    Run.objects.create(run_id=uuid.uuid4(), project="test-project")  # a different run, must not match
+
+    resp = client.get("/api/runs/", {"run_id": str(run_id)})
+    ids = [r["id"] for r in resp.data["results"]]
+    assert ids == [run.id]
+
+
 def test_undeclared_filter_param_is_ignored_not_silently_returning_everything(client):
     """Real documented risk this project guards against explicitly: an undeclared DRF/django-filter
     query param is silently dropped rather than erroring. This test just pins the CURRENT, known
