@@ -87,7 +87,21 @@ class ModelPricingViewSet(viewsets.ModelViewSet):
     queryset = ModelPricing.objects.all()
     serializer_class = ModelPricingSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["model", "verification", "provider"]
+    filterset_fields = ["model", "verification", "provider", "voided"]
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        """Marks a wrong ModelPricing row voided instead of editing or deleting it -- same discipline
+        as Expense.void: the row (and why it was wrong) stays, the correction is always a NEW row.
+        Body: {"reason": "..."}."""
+        pricing = self.get_object()
+        reason = request.data.get("reason", "")
+        if not reason:
+            return Response({"error": "'reason' is required to void a pricing row"}, status=status.HTTP_400_BAD_REQUEST)
+        pricing.voided = True
+        pricing.void_reason = reason
+        pricing.save()
+        return Response(self.get_serializer(pricing).data)
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -381,3 +395,58 @@ class CostDistributionView(viewsets.ViewSet):
             return Response({"error": "metric must be 'expense' or 'llm_call'"}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"metric": metric, "tags": [{"key": k, "value": v} for k, v in pairs], **compute_distribution(values)})
+
+
+class ForecastRegressionView(viewsets.ViewSet):
+    """`POST /forecast-regression/` with `{"points": [{"x": 1, "y": 2.5}, ...], "predict_x": <optional>}`
+    -- fits linear/sqrt/quadratic/power to the given points, reports every form's R-squared, and names
+    the best-fitting one. If `predict_x` is given, also returns that form's prediction for it. Needs
+    the `forecasting` extra (`pip install django-llm-ledger[forecasting]`); returns 501 with that exact
+    instruction if numpy/scipy aren't installed, rather than a bare import error."""
+
+    def create(self, request):
+        try:
+            from .forecasting import NotEnoughData, fit_best_regression, predict_from_fit
+        except ImportError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+        points = request.data.get("points")
+        if not points or not isinstance(points, list):
+            return Response({"error": "'points' must be a non-empty list of {\"x\":..,\"y\":..}"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            xs = [p["x"] for p in points]
+            ys = [p["y"] for p in points]
+        except (KeyError, TypeError):
+            return Response({"error": "every point needs numeric 'x' and 'y'"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = fit_best_regression(xs, ys)
+        except NotEnoughData as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        predict_x = request.data.get("predict_x")
+        if predict_x is not None:
+            result["prediction"] = {"x": predict_x, "y": predict_from_fit(result, predict_x), "using": result["best"]}
+        return Response(result)
+
+
+class ForecastDistributionView(viewsets.ViewSet):
+    """`POST /forecast-distribution/` with `{"values": [1.2, 3.4, ...]}` -- fits
+    normal/lognormal/gamma/exponential/pareto and names the best by AIC. Same `forecasting` extra
+    requirement as /forecast-regression/."""
+
+    def create(self, request):
+        try:
+            from .forecasting import NotEnoughData, fit_best_distribution
+        except ImportError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+        values = request.data.get("values")
+        if not values or not isinstance(values, list):
+            return Response({"error": "'values' must be a non-empty list of numbers"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = fit_best_distribution(values)
+        except NotEnoughData as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)

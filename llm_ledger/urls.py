@@ -8,6 +8,8 @@ from .views import (
     CostSummaryView,
     CostTimeseriesView,
     ExpenseViewSet,
+    ForecastDistributionView,
+    ForecastRegressionView,
     LLMCallViewSet,
     ModelPricingViewSet,
     ProviderPricingPolicyViewSet,
@@ -27,5 +29,7 @@ router.register("expenses", ExpenseViewSet, basename="expense")
 router.register("cost-summary", CostSummaryView, basename="cost-summary")
 router.register("cost-timeseries", CostTimeseriesView, basename="cost-timeseries")
 router.register("cost-distribution", CostDistributionView, basename="cost-distribution")
+router.register("forecast-regression", ForecastRegressionView, basename="forecast-regression")
+router.register("forecast-distribution", ForecastDistributionView, basename="forecast-distribution")
 
 urlpatterns = router.urls
