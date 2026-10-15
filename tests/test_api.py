@@ -137,3 +137,60 @@ def test_posting_a_non_uuid_run_id_returns_a_clean_400_not_a_500(client):
     pre-check with an unhandled 500 instead of falling through to the serializer's own validation."""
     resp = client.post("/api/runs/", {"run_id": "not-a-real-uuid", "project": "p"}, format="json")
     assert resp.status_code == 400
+
+
+def test_cost_by_purpose_groups_llm_calls_by_call_purpose(client):
+    run = Run.objects.create(run_id=uuid.uuid4(), project="p")
+    LLMCall.objects.create(run=run, provider="x", model="m", cost_usd=Decimal("3.00"), billing="api", call_purpose="translation")
+    LLMCall.objects.create(run=run, provider="x", model="m", cost_usd=Decimal("2.00"), billing="api", call_purpose="translation")
+    LLMCall.objects.create(run=run, provider="x", model="m", cost_usd=Decimal("1.00"), billing="api", call_purpose="review")
+
+    resp = client.get(f"/api/runs/{run.id}/cost_by_purpose/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["total_cost_usd"] == "6.000000"
+    by = {row["call_purpose"]: row for row in resp.data["by_purpose"]}
+    assert by["translation"]["cost_usd"] == "5.000000"
+    assert by["translation"]["call_count"] == 2
+    assert by["review"]["cost_usd"] == "1.000000"
+    assert round(by["translation"]["pct_of_total"]) == 83
+
+
+def test_step_costs_apportions_expense_cost_by_step_duration(client):
+    from datetime import datetime, timedelta, timezone as dt_timezone
+    from llm_ledger.models import Expense, RunStep
+
+    run = Run.objects.create(run_id=uuid.uuid4(), project="p")
+    Expense.objects.create(source="runpod", category="gpu-pod", amount_usd=Decimal("100.00"), run=run)
+
+    start = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
+    RunStep.objects.create(run=run, label="data_prep", started_at=start, ended_at=start + timedelta(seconds=10))
+    RunStep.objects.create(run=run, label="train", started_at=start + timedelta(seconds=10), ended_at=start + timedelta(seconds=90))
+
+    resp = client.get(f"/api/runs/{run.id}/step_costs/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["total_cost_usd"] == "100.000000"
+    steps = {s["label"]: s for s in resp.data["steps"]}
+    assert steps["data_prep"]["apportioned_cost_usd"] == "11.111111"  # 10/90 of total duration
+    assert steps["train"]["apportioned_cost_usd"] == "88.888889"
+
+
+def test_step_costs_with_no_steps_recorded_says_so(client):
+    run = Run.objects.create(run_id=uuid.uuid4(), project="p")
+    resp = client.get(f"/api/runs/{run.id}/step_costs/")
+    assert resp.status_code == 200
+    assert resp.data["steps"] == []
+    assert "note" in resp.data
+
+
+def test_step_costs_treats_an_unfinished_step_as_still_running(client):
+    from datetime import datetime, timedelta, timezone as dt_timezone
+    from llm_ledger.models import Expense, RunStep
+
+    run = Run.objects.create(run_id=uuid.uuid4(), project="p")
+    Expense.objects.create(source="runpod", category="gpu-pod", amount_usd=Decimal("50.00"), run=run)
+    RunStep.objects.create(run=run, label="still_training", started_at=datetime.now(dt_timezone.utc) - timedelta(seconds=30), ended_at=None)
+
+    resp = client.get(f"/api/runs/{run.id}/step_costs/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["steps"][0]["still_running"] is True
+    assert resp.data["steps"][0]["duration_seconds"] > 0

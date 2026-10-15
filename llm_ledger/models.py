@@ -187,6 +187,30 @@ class Run(models.Model):
         return f"{self.project}/{self.label or 'run'} ({self.run_id})"
 
 
+class RunStep(models.Model):
+    """One named phase within a Run's wall-clock time (e.g. "data_prep", "epoch_1_train",
+    "epoch_1_eval", "checkpoint_save") -- the GPU-time equivalent of LLMCall.call_purpose's per-step
+    cost attribution, for a job whose cost is GPU-rental time, not per-token API calls (an SFT
+    training run has no LLMCall rows at all; its real cost is an Expense keyed to the Run). A step has
+    no cost of its own -- cost is APPORTIONED after the fact, by `RunViewSet.step_costs`, as
+    (this step's duration / the run's total step duration) * the run's total real Expense cost. This
+    generalizes the pattern already proven in agentic-doc-treatement (LLMCall.call_purpose, used to
+    find where an STT/translation job's cost concentrated) to the GPU-time case, where there's no
+    per-call row to group by -- only wall-clock phase boundaries the training script itself reports."""
+
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name="steps")
+    label = models.CharField(max_length=128)
+    started_at = models.DateTimeField()
+    ended_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField(max_length=256, blank=True, default="")
+
+    class Meta:
+        ordering = ["run", "started_at"]
+
+    def __str__(self) -> str:
+        return f"{self.run_id}/{self.label}"
+
+
 class LLMCall(models.Model):
     """One real (or subscription-covered) LLM API call. Essentially unchanged from
     agentic-doc-treatement's LLMCall -- this model was already fully generic, no project-specific concept

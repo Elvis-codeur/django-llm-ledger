@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, Tag
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, RunStep, Tag
 
 
 class ProviderSerializer(serializers.ModelSerializer):
@@ -30,6 +30,12 @@ class TagSerializer(serializers.ModelSerializer):
 class RunSerializer(serializers.ModelSerializer):
     class Meta:
         model = Run
+        fields = "__all__"
+
+
+class RunStepSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RunStep
         fields = "__all__"
 
 
