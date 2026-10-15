@@ -21,23 +21,63 @@ from .analytics import (
     filter_by_tag_pairs,
     parse_query_datetime,
 )
-from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Run, Tag
-from .pricing import NoPricingError, compute_cost, find_pricing
+from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, Run, Tag
+from .pricing import NoPricingError, compute_cost, find_pricing, provider_is_peak
 from .serializers import (
     ExpenseCommentSerializer,
     ExpenseSerializer,
     LLMCallSerializer,
     ModelPricingSerializer,
+    ProviderSerializer,
     RunSerializer,
     TagSerializer,
 )
+
+
+class ProviderViewSet(viewsets.ModelViewSet):
+    queryset = Provider.objects.all()
+    serializer_class = ProviderSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["name"]
+
+    def create(self, request, *args, **kwargs):
+        """Idempotent by name, same reasoning as Tag/Run: a provider is an identity, looked up by its
+        short name, not an event."""
+        name = request.data.get("name")
+        if name:
+            existing = Provider.objects.filter(name=name).first()
+            if existing is not None:
+                return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
+
+    @action(detail=True, methods=["get"])
+    def peak_status(self, request, pk=None):
+        """"Which hour are we in, pricing-wise, for this provider right now (or at `?at=<iso datetime>`
+        if given)" -- the direct answer to the "accountancy map" question, independent of any one
+        model."""
+        provider = self.get_object()
+        at_param = request.query_params.get("at")
+        try:
+            at = parse_query_datetime(at_param) if at_param else datetime.now(dt_timezone.utc)
+        except BadQueryParam as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        peak = provider_is_peak(provider, at)
+        return Response(
+            {
+                "provider": provider.name,
+                "at": at.isoformat(),
+                "has_peak_schedule": peak is not None,
+                "is_peak": peak,
+                "offpeak_multiplier": str(provider.offpeak_multiplier) if provider.offpeak_multiplier is not None else None,
+            }
+        )
 
 
 class ModelPricingViewSet(viewsets.ModelViewSet):
     queryset = ModelPricing.objects.all()
     serializer_class = ModelPricingSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["model", "verification"]
+    filterset_fields = ["model", "verification", "provider"]
 
 
 class TagViewSet(viewsets.ModelViewSet):

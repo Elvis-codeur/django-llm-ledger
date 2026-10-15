@@ -10,11 +10,13 @@ from .views import (
     ExpenseViewSet,
     LLMCallViewSet,
     ModelPricingViewSet,
+    ProviderViewSet,
     RunViewSet,
     TagViewSet,
 )
 
 router = DefaultRouter()
+router.register("providers", ProviderViewSet, basename="provider")
 router.register("model-pricing", ModelPricingViewSet, basename="model-pricing")
 router.register("tags", TagViewSet, basename="tag")
 router.register("runs", RunViewSet, basename="run")
