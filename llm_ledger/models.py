@@ -58,6 +58,25 @@ class ModelPricing(models.Model):
         return f"{self.model} ({self.effective_from}..{self.effective_until or 'now'})"
 
 
+class Tag(models.Model):
+    """A key/value label for cost attribution (e.g. key="project", value="agentic-reasoning-translator",
+    or key="type", value="training") -- AWS-style cost-allocation tags, not a single flat string, so a
+    Run or Expense can carry several independent dimensions (which project, what kind of work, which
+    experiment) and be queried by any one of them without the others colliding."""
+
+    key = models.CharField(max_length=64, db_index=True)
+    value = models.CharField(max_length=128, db_index=True)
+
+    class Meta:
+        ordering = ["key", "value"]
+        constraints = [
+            models.UniqueConstraint(fields=["key", "value"], name="llm_ledger_unique_tag_kv"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.key}:{self.value}"
+
+
 class Run(models.Model):
     """One unit of work worth tracking cost for -- a translation pass, a training job, a backfill script,
     whatever the calling project calls a 'run'. Generalized from agentic-doc-treatement's PipelineRun: no
@@ -90,6 +109,7 @@ class Run(models.Model):
     git_commit = models.CharField(max_length=40, blank=True)
     config = models.JSONField(default=dict, blank=True)
     result_summary = models.JSONField(default=dict, blank=True)
+    tags = models.ManyToManyField(Tag, blank=True, related_name="runs")
 
     class Meta:
         ordering = ["-started_at"]
@@ -150,3 +170,63 @@ class LLMCall(models.Model):
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.model} @ {self.timestamp} (${self.cost_usd})"
+
+
+class Expense(models.Model):
+    """Any real cost that is NOT a per-token LLM API call -- GPU rental (RunPod pods/endpoints),
+    storage, network volumes, a flat subscription fee, anything billed in dollars that this ledger
+    should still account for. Deliberately NOT modelled as an LLMCall: an LLMCall has tokens, a model,
+    pricing provenance; a GPU-hour or a storage-GB-month has none of that and forcing it through the
+    same shape would mean a pile of meaningless null token columns. `source` names the billing system
+    (e.g. "runpod"), `category` names the kind of resource within it (e.g. "gpu-pod",
+    "network-volume", "serverless-endpoint") -- both free text, since this app has no fixed opinion on
+    every provider's resource taxonomy, same reasoning as Run.project/label."""
+
+    source = models.CharField(max_length=64, db_index=True)
+    category = models.CharField(max_length=64, blank=True, default="")
+    amount_usd = models.DecimalField(max_digits=12, decimal_places=6)
+    occurred_at = models.DateTimeField(default=timezone.now)
+    description = models.CharField(max_length=256, blank=True, default="")
+    # Caller-supplied idempotency key (e.g. a RunPod billing record id) -- unique per source when
+    # non-empty, so re-running an importer against the same billing window cannot double-insert. Same
+    # pattern as LLMCall.external_id.
+    external_id = models.CharField(max_length=160, blank=True, default="")
+    # The raw billing record as returned by the source system, kept for provenance/debugging -- never
+    # trusted over amount_usd, which is the one field actually summed for reporting.
+    raw = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(Run, on_delete=models.SET_NULL, null=True, blank=True, related_name="expenses")
+    tags = models.ManyToManyField(Tag, blank=True, related_name="expenses")
+
+    class Meta:
+        ordering = ["-occurred_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_id"],
+                condition=~models.Q(external_id=""),
+                name="llm_ledger_unique_external_id_per_source",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source}/{self.category or 'expense'} @ {self.occurred_at} (${self.amount_usd})"
+
+
+class ExpenseComment(models.Model):
+    """A free-text note attached to one Expense, for exactly the case a flat billing import can't
+    capture on its own: a weird or unexplained cost that a human or an LLM looked into later and wants
+    to leave a record of -- what it actually was, which project it really belongs to, whether it was a
+    mistake -- so the NEXT person or model to look at this ledger doesn't have to re-investigate from
+    scratch. A separate model (not a single growing text field on Expense) because more than one note
+    can accumulate over time, each with its own author and timestamp, and a comment should be addable
+    without re-PUTting the whole Expense row."""
+
+    expense = models.ForeignKey(Expense, on_delete=models.CASCADE, related_name="comments")
+    author = models.CharField(max_length=64, blank=True, default="", help_text="free text, e.g. a human's name or an agent/model id")
+    text = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"comment on expense {self.expense_id} by {self.author or 'unknown'}"
