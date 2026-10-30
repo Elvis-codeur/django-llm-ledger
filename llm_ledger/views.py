@@ -25,7 +25,7 @@ from .analytics import (
     parse_query_datetime,
 )
 from .models import Expense, ExpenseComment, LLMCall, ModelPricing, Provider, ProviderPricingPolicy, Run, RunStep, Tag
-from .pricing import NoPricingError, compute_cost, find_pricing, find_provider_policy, provider_is_peak
+from .pricing import find_provider_policy, pricing_fields, provider_is_peak
 from .serializers import (
     ExpenseCommentSerializer,
     ExpenseSerializer,
@@ -276,32 +276,28 @@ class LLMCallViewSet(viewsets.ModelViewSet):
     queryset = LLMCall.objects.all()
     serializer_class = LLMCallSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["run", "provider", "model", "billing", "status", "external_id"]
+    filterset_fields = ["run", "provider", "model", "billing", "status", "external_id", "cost_complete"]
 
     def perform_create(self, serializer):
-        """Computes cost_usd/pricing_used from ModelPricing server-side -- a client posts raw token
-        counts, never a claimed cost, so pricing drift or a client bug can't silently misreport spend.
-        billing="subscription" calls are never priced (cost_usd stays 0; that is correct, not a gap --
-        see LLMCall.billing)."""
+        """Computes cost_usd (or, for a subscription call, api_equivalent_cost_usd), the cost breakdown
+        and cost_complete from ModelPricing server-side -- a client posts raw usage, never a claimed
+        cost, so pricing drift or a client bug can't silently misreport spend. A call with no pricing
+        row is still saved (an absent price is a data gap to fill, not a reason to refuse the write),
+        marked cost_complete=False."""
         data = serializer.validated_data
-        if data.get("billing") == "subscription":
-            serializer.save()
-            return
-        at = data.get("timestamp") or datetime.now(dt_timezone.utc)
-        try:
-            pricing = find_pricing(data["model"], at)
-        except NoPricingError:
-            serializer.save()  # cost_usd stays 0 -- an absent price is a data gap to fill, not a reason to refuse the write
-            return
-        cost = compute_cost(
-            pricing,
-            at=at,
+        fields = pricing_fields(
+            model=data["model"],
+            at=data.get("timestamp") or datetime.now(dt_timezone.utc),
+            billing=data.get("billing", "api"),
             prompt_tokens=data.get("prompt_tokens", 0),
             completion_tokens=data.get("completion_tokens", 0),
             cache_read_tokens=data.get("cache_read_tokens", 0),
             cache_creation_tokens=data.get("cache_creation_tokens", 0),
+            usage_extra=data.get("usage_extra"),
+            modifiers=data.get("pricing_modifiers"),
+            claimed_api_equivalent=data.get("api_equivalent_cost_usd"),
         )
-        serializer.save(cost_usd=cost, pricing_used=pricing)
+        serializer.save(**fields)
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):

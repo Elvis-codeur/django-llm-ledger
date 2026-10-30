@@ -66,6 +66,39 @@ Defaults to SQLite and `DEBUG=True` for local use — override via `LLM_LEDGER_D
   for leaving a note on a weird/unexplained line item. **Append-only**: a wrong `Expense` is voided
   (`voided`/`void_reason`/`superseded_by`), never deleted — see "Accounting notes" below.
 
+## Pricing a call the way providers bill it
+
+`pricing.price_call()` prices every component a provider charges for, and says what it could not price:
+
+- **Tokens**: input, output, cache reads, cache writes. A call's `cache_creation_tokens` is all cache
+  writes; send the part written to the 1-hour cache as `usage_extra["cache_write_1h_tokens"]` and it
+  is priced at `cache_write_1h_usd_per_mtok` (Anthropic: 2x input, versus 1.25x for 5 minutes).
+- **Long prompts**: `ModelPricing.context_tiers`, e.g. OpenAI over 272k input tokens, Claude Haiku 5.5
+  over 100k. Prompt length counts input + cache reads + cache writes.
+- **Request options**: `LLMCall.pricing_modifiers` (`["batch"]`, `["fast", "geo:us"]`) scaled by
+  `ModelPricing.modifier_multipliers`; they stack with each other and with off-peak.
+- **Per-unit fees**: `LLMCall.usage_extra` counts (`{"web_search_requests": 3}`) priced by
+  `ModelPricing.unit_prices` (`{"web_search_requests": {"usd": "10", "per": 1000}}`), not discounted
+  by batch/off-peak.
+- **Images and reasoning** are billed by Anthropic, OpenAI and DeepSeek as input and output tokens, so
+  they are already inside the token counts. `usage_extra` keys `images`, `image_input_tokens` and
+  `reasoning_tokens` are kept for information and never priced a second time.
+
+Every call stores `cost_breakdown` (each part in USD, the tier and multipliers used) and
+`cost_complete`. Usage with no rate on the pricing row is **never silently $0**: it is listed in
+`cost_breakdown["unpriced"]` and the call gets `cost_complete=False`, so `GET /calls/?cost_complete=false`
+shows exactly what pricing data is missing. A subscription call keeps `cost_usd` at 0 and gets the
+server-computed list price in `api_equivalent_cost_usd`.
+
+After correcting a price (void the wrong row, add a new one), re-price what was already recorded:
+
+```
+python -m llm_ledger.standalone.manage reprice_calls --dry-run          # what would change, per model
+python -m llm_ledger.standalone.manage reprice_calls --model deepseek/deepseek-flash
+```
+
+Each re-priced call keeps its previous figure under `cost_breakdown["previous"]`.
+
 ## API
 
 ```
