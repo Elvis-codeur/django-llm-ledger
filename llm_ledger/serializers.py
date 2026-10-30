@@ -43,7 +43,7 @@ class LLMCallSerializer(serializers.ModelSerializer):
     class Meta:
         model = LLMCall
         fields = "__all__"
-        read_only_fields = ["cost_usd", "pricing_used"]
+        read_only_fields = ["cost_usd", "pricing_used", "cost_breakdown", "cost_complete"]
 
 
 class ExpenseCommentSerializer(serializers.ModelSerializer):

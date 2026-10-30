@@ -120,6 +120,22 @@ class ModelPricing(models.Model):
     voided = models.BooleanField(default=False)
     void_reason = models.TextField(blank=True, default="")
 
+    # What providers bill beyond the four token rates above (see pricing.price_call; checked against
+    # the Anthropic/OpenAI/DeepSeek pricing pages 2026-10-30):
+    #
+    # context_tiers: higher rates once a request's prompt is long. A list of
+    #   {"above_prompt_tokens": 272000, "input_usd_per_mtok": "4", "output_usd_per_mtok": "15", ...}
+    #   where any rate key left out keeps the base row's rate. Prompt length = input + cache reads +
+    #   cache writes (Anthropic's stated definition; OpenAI's "input tokens" counts the same tokens).
+    # unit_prices: fees per unit that is not a token. {"web_search_requests": {"usd": "10", "per": 1000}}.
+    #   Keys match the counts a call sends in LLMCall.usage_extra.
+    # modifier_multipliers: request options that scale every token rate, stacking with each other and
+    #   with off-peak: {"batch": "0.5", "flex": "0.5", "fast": "2", "geo:us": "1.1"}. Keys match
+    #   LLMCall.pricing_modifiers. Unit fees are not scaled (a batch web search still costs $10/1k).
+    context_tiers = models.JSONField(null=True, blank=True)
+    unit_prices = models.JSONField(null=True, blank=True)
+    modifier_multipliers = models.JSONField(null=True, blank=True)
+
     class Meta:
         ordering = ["model", "effective_from"]
 
@@ -250,6 +266,22 @@ class LLMCall(models.Model):
     latency_ms = models.IntegerField(null=True, blank=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="success")
     error_message = models.TextField(blank=True)
+
+    # Usage the four token columns don't cover, as counts: {"cache_write_1h_tokens": 20983,
+    # "web_search_requests": 2, "code_execution_hours": 0.05}. cache_write_1h_tokens is the part of
+    # cache_creation_tokens written to the 1-hour cache (priced at the 1h rate). Informational keys
+    # (reasoning_tokens, image_input_tokens, images) are kept but never priced: providers bill reasoning
+    # as output and image input as input tokens, both already inside the token columns.
+    usage_extra = models.JSONField(default=dict, blank=True)
+    # Request options that change the price, e.g. ["batch"], ["fast", "geo:us"] -- matched against
+    # ModelPricing.modifier_multipliers.
+    pricing_modifiers = models.JSONField(default=list, blank=True)
+    # Server-computed: what each component cost, which tier/multipliers applied, and anything that could
+    # not be priced. Never trusted from a client.
+    cost_breakdown = models.JSONField(default=dict, blank=True)
+    # False when some usage of this call has no price (no pricing row, or a row missing that rate): the
+    # call's cost is then a lower bound. Filter on it to find what pricing data still needs adding.
+    cost_complete = models.BooleanField(default=True, db_index=True)
 
     class Meta:
         ordering = ["timestamp"]
